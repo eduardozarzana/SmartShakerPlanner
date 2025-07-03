@@ -16,8 +16,10 @@ git push -u origin main
 
 Write-Host "✅ Projeto enviado para GitHub!" -ForegroundColor Green
 Write-Host "📝 Próximos passos:" -ForegroundColor Yellow
-Write-Host "1. Acesse https://github.com/eduardozarzana/SmartShakerPlanner" -ForegroundColor White
-Write-Host "2. Vá em Settings > Secrets and variables > Actions" -ForegroundColor White
-Write-Host "3. Adicione os secrets: GEMINI_API_KEY, VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY" -ForegroundColor White
-Write-Host "4. Vá em Settings > Pages e selecione 'GitHub Actions' como source" -ForegroundColor White
-Write-Host "5. Seu site estará disponível em: https://eduardozarzana.github.io/SmartShakerPlanner/" -ForegroundColor Cyan
+Write-Host "1. Acesse https://github.com/eduardozarzana/SmartShakerPlanner/settings/secrets/actions" -ForegroundColor White
+Write-Host "2. Adicione os seguintes secrets:" -ForegroundColor White
+Write-Host "   - GEMINI_API_KEY: sua_chave_gemini_aqui" -ForegroundColor Cyan
+Write-Host "   - VITE_SUPABASE_URL: https://ardzsloaomwjakqbcxsr.supabase.co" -ForegroundColor Cyan
+Write-Host "   - VITE_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFyZHpzbG9hb213amFrcWJjeHNyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg2NDIyMDYsImV4cCI6MjA2NDIxODIwNn0.SaQJvU2S9CbvwNKhZ1Sqxh0-yxuJDDs-SkufF3zNLkE" -ForegroundColor Cyan
+Write-Host "3. Vá em Settings > Pages e selecione 'GitHub Actions' como source" -ForegroundColor White
+Write-Host "4. Seu site estará disponível em: https://eduardozarzana.github.io/SmartShakerPlanner/" -ForegroundColor Green
