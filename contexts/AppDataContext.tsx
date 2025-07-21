@@ -1,3 +1,4 @@
+
 import React, { createContext, useContext, ReactNode, useEffect, useState, useCallback } from 'react';
 import { supabase } from '../supabaseClient';
 import { 
@@ -93,8 +94,8 @@ const mapDbToProduct = (db: DbProduct): Product => ({
   name: db.name,
   sku: db.sku,
   description: db.description,
-  ingredients: db.ingredients,
-  processingTimes: db.processing_times,
+  ingredients: db.ingredients || [],
+  processingTimes: db.processing_times || [],
   classification: db.classification,
   manufacturedFor: db.manufactured_for,
   createdAt: db.created_at,
@@ -116,7 +117,7 @@ const mapDbToProductionLine = (db: DbProductionLine): ProductionLine => ({
   name: db.name,
   description: db.description,
   equipmentIds: db.equipment_ids || [],
-  operatingHours: db.operating_hours,
+  operatingHours: db.operating_hours || [],
   createdAt: db.created_at,
   updatedAt: db.updated_at,
   isPaused: db.is_paused,
@@ -198,6 +199,7 @@ interface AppDataContextType {
   updateSchedule: (item: ScheduledProductionRun, shouldRefetch?: boolean) => Promise<ScheduledProductionRun | null>;
   deleteSchedule: (id: string) => Promise<void>;
   getScheduleById: (id: string) => ScheduledProductionRun | undefined;
+  finishScheduleNow: (scheduleId: string) => Promise<{ success: boolean; message?: string }>;
   
   optimizeDaySchedules: (dateToOptimize: Date) => Promise<{
     optimizedCount: number;
@@ -735,7 +737,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
 
     const linesInUseToday = [...new Set(schedulesForDay.map(s => s.lineId))]
         .map(id => getProductionLineByIdOp(id))
-        .filter(l => l !== undefined) as ProductionLine[];
+        .filter((l): l is ProductionLine => l !== undefined);
 
     for (const line of linesInUseToday) {
         if (line.isPaused) {
@@ -840,6 +842,38 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
 }, [schedules, getProductionLineByIdOp, getProductByIdOp, updateScheduleOp, fetchInitialData, addWorkingTime, calculateEffectiveWorkDuration]);
 
 
+  const finishScheduleNowOp = useCallback(async (scheduleId: string): Promise<{ success: boolean; message?: string }> => {
+    const scheduleToFinish = schedules.find(s => s.id === scheduleId);
+    if (!scheduleToFinish) {
+        const msg = `Agendamento com ID ${scheduleId} não encontrado.`;
+        handleError('finishScheduleNow', new Error(msg));
+        return { success: false, message: msg };
+    }
+
+    if (scheduleToFinish.status !== 'Em Progresso') {
+        const msg = `O agendamento não está 'Em Progresso'. Status atual: ${scheduleToFinish.status}.`;
+        console.warn(`Attempted to finish a schedule that is not 'In Progress'. ID: ${scheduleId}, Status: ${scheduleToFinish.status}`);
+        return { success: false, message: msg };
+    }
+
+    const updatedSchedule: ScheduledProductionRun = {
+        ...scheduleToFinish,
+        status: 'Concluído',
+        endTime: new Date().toISOString(),
+    };
+
+    const result = await updateScheduleOp(updatedSchedule, true); // shouldRefetch = true
+    if (result) {
+        const product = getProductByIdOp(result.productId);
+        const msg = `Produção de "${product?.name || 'produto desconhecido'}" finalizada com sucesso. A linha está livre.`;
+        return { success: true, message: msg };
+    } else {
+        const msg = `Falha ao finalizar a produção.`;
+        return { success: false, message: msg };
+    }
+  }, [schedules, handleError, updateScheduleOp, getProductByIdOp]);
+
+
   // Effect for automatic schedule status updates
   useEffect(() => {
     const timer = setInterval(() => {
@@ -868,6 +902,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
       products, addProduct: addProductOp, updateProduct: updateProductOp, deleteProduct: deleteProductOp, getProductById: getProductByIdOp,
       productionLines, addProductionLine: addProductionLineOp, updateProductionLine: updateProductionLineOp, deleteProductionLine: deleteProductionLineOp, getProductionLineById: getProductionLineByIdOp,
       schedules, addSchedule: addScheduleOp, updateSchedule: updateScheduleOp, deleteSchedule: deleteScheduleOp, getScheduleById: getScheduleByIdOp,
+      finishScheduleNow: finishScheduleNowOp,
       pauseLine: pauseLineOp,
       resumeLine: resumeLineOp,
       addWorkingTime,
