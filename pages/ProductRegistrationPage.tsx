@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { useAppData } from '../contexts/AppDataContext';
 import { Product, Equipment, SelectOption, ProductClassification } from '../types';
@@ -14,7 +13,7 @@ import { generateUUID } from '../utils/uuid';
 
 
 interface ProductFormProps {
-  onSubmit: (product: Product) => void;
+  onSubmit: (product: Omit<Product, 'id' | 'createdAt' | 'updatedAt'> | Product) => void;
   initialData?: Product;
   onClose: () => void;
   allEquipment: Equipment[];
@@ -26,6 +25,7 @@ const ProductForm: React.FC<ProductFormProps> = ({ onSubmit, initialData, onClos
   const [description, setDescription] = useState(initialData?.description || '');
   const [manufacturedFor, setManufacturedFor] = useState(initialData?.manufacturedFor || ''); // New state
   const [classification, setClassification] = useState<ProductClassification>(initialData?.classification || 'Normal');
+  const [ganttBarColor, setGanttBarColor] = useState(initialData?.ganttBarColor || '#3b82f6'); // Default: blue-500
   const [currentProcessingTimes, setCurrentProcessingTimes] = useState<Array<{ equipmentId: string; timePerUnitMinutes: number; id: string }>>(
     initialData?.processingTimes.map(pt => ({ ...pt, id: generateUUID() })) || []
   );
@@ -75,14 +75,14 @@ const ProductForm: React.FC<ProductFormProps> = ({ onSubmit, initialData, onClos
       description,
       manufacturedFor: manufacturedFor || undefined, // Store if provided
       classification,
+      ganttBarColor,
       processingTimes: currentProcessingTimes.map(({id, ...rest}) => rest), // Remove temporary id
     };
 
     if (initialData) {
       onSubmit({ ...initialData, ...productData });
     } else {
-      // For a new product, AppDataContext will generate the ID
-      onSubmit({ id: '', ...productData } as Product); // Cast as Product, ID will be handled by context
+      onSubmit(productData); // Pass without ID for creation
     }
   };
 
@@ -99,14 +99,29 @@ const ProductForm: React.FC<ProductFormProps> = ({ onSubmit, initialData, onClos
         onChange={(e) => setManufacturedFor(e.target.value)} 
       />
 
-      <Select
-        label="Classificação do Produto"
-        id="productClassification"
-        options={classificationOptions}
-        value={classification}
-        onChange={(e) => setClassification(e.target.value as ProductClassification)}
-        required
-      />
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Select
+            label="Classificação do Produto"
+            id="productClassification"
+            options={classificationOptions}
+            value={classification}
+            onChange={(e) => setClassification(e.target.value as ProductClassification)}
+            required
+        />
+        <div>
+            <label htmlFor="ganttBarColor" className="block text-sm font-medium text-green-700 mb-1">Cor no Gráfico</label>
+            <div className="flex items-center gap-2">
+                <Input 
+                    type="color" 
+                    id="ganttBarColor" 
+                    value={ganttBarColor} 
+                    onChange={(e) => setGanttBarColor(e.target.value)} 
+                    className="p-1 h-10 w-12 block"
+                />
+                <div className="w-full h-10 rounded border border-gray-300" style={{ backgroundColor: ganttBarColor }} title={`Pré-visualização da cor: ${ganttBarColor}`} />
+            </div>
+        </div>
+      </div>
       
       <fieldset className="border border-green-300 p-4 rounded-md">
         <legend className="text-sm font-medium text-green-700 px-1">Tempos de Processamento por Equipamento</legend>
@@ -186,11 +201,11 @@ const ProductRegistrationPage: React.FC = () => {
   };
 
 
-  const handleSubmitForm = (data: Product) => {
-    if (data.id && products.find(p => p.id === data.id)) { // Check if it's an existing product by ID
-      updateProduct(data);
+  const handleSubmitForm = (data: Omit<Product, 'id' | 'createdAt' | 'updatedAt'> | Product) => {
+    if ('id' in data && data.id) {
+      updateProduct(data as Product);
     } else {
-      addProduct(data); // Let AppDataContext handle ID generation for new products
+      addProduct(data as Omit<Product, 'id' | 'createdAt' | 'updatedAt'>);
     }
     setIsModalOpen(false);
     setEditingProduct(undefined);
@@ -225,9 +240,16 @@ const ProductRegistrationPage: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {products.map((product) => (
             <Card key={product.id} title={product.name} actions={
-              <span className={`px-2 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full ${getClassificationBadgeColor(product.classification)}`}>
-                  {product.classification === 'Top Seller' ? 'Top Seller' : 'Normal'}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full ${getClassificationBadgeColor(product.classification)}`}>
+                    {product.classification === 'Top Seller' ? 'Top Seller' : 'Normal'}
+                </span>
+                <div 
+                  className="w-5 h-5 rounded-full border border-gray-300" 
+                  style={{ backgroundColor: product.ganttBarColor || '#3b82f6' }}
+                  title={`Cor no gráfico: ${product.ganttBarColor || '#3b82f6'}`}
+                />
+              </div>
             }>
               <div className="space-y-2 text-sm text-green-600">
                 <p><strong className="text-green-800">SKU:</strong> {product.sku}</p>
