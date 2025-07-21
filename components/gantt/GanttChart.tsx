@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, forwardRef } from 'react';
+import React, { useState, useCallback, useMemo, forwardRef, useRef } from 'react';
 import { ScheduledProductionRun, ProductionLine, Product, OperatingDayTime, ProductClassification, ScheduleStatus } from '../../types';
 import { LockClosedIcon } from '../icons';
 import { useAppData } from '../../contexts/AppDataContext'; 
@@ -145,6 +145,19 @@ function getOperationalSegments(
   return mergedSegments.filter(s => s.segmentStart < s.segmentEnd);
 }
 
+const getContrastingTextColor = (hexColor?: string): string => {
+    if (!hexColor || hexColor.length < 7) return '#ffffff'; // Default to white for invalid colors
+    try {
+      const r = parseInt(hexColor.slice(1, 3), 16);
+      const g = parseInt(hexColor.slice(3, 5), 16);
+      const b = parseInt(hexColor.slice(5, 7), 16);
+      // Formula to determine brightness (YIQ)
+      const yiq = ((r * 299) + (g * 587) + (b * 114)) / 1000;
+      return (yiq >= 128) ? '#000000' : '#ffffff'; // Return black for light colors, white for dark
+    } catch (e) {
+      return '#ffffff'; // Fallback on parsing error
+    }
+};
 
 const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
     schedules,
@@ -168,6 +181,7 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
   } | null>(null);
   const [dropTargetLineId, setDropTargetLineId] = useState<string | null>(null);
   const [isDropValid, setIsDropValid] = useState<boolean | null>(null);
+  const scrollIntervalRef = useRef<number | null>(null);
 
   const linesWithSchedulesInView = useMemo(() => {
     return lines.filter(line => schedules.some(s => s.lineId === line.id));
@@ -191,6 +205,12 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
     return minutesToPixels(totalMinutesFromViewStart);
   }, [currentTime, startDayOfView, isCurrentTimeInView]);
 
+  const stopAutoScroll = useCallback(() => {
+    if (scrollIntervalRef.current) {
+        clearInterval(scrollIntervalRef.current);
+        scrollIntervalRef.current = null;
+    }
+  }, []);
 
  const checkDropValidity = useCallback((
     item: ScheduledProductionRun,
@@ -374,10 +394,40 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
     } else if (validityCheck.valid && draggedItem.lastFeedbackMessage) {
         setDraggedItem(prev => prev ? {...prev, lastFeedbackMessage: null} : null);
     }
+    
+    // Autoscroll logic
+    const ganttContainer = (ref as React.RefObject<HTMLDivElement>)?.current;
+    if (!ganttContainer) return;
+
+    const containerRectForScroll = ganttContainer.getBoundingClientRect();
+    const scrollTriggerZone = 70; // pixels from the edge
+    const maxScrollSpeed = 30; // pixels per interval
+    const clientX = e.clientX;
+
+    if (clientX > containerRectForScroll.right - scrollTriggerZone && clientX <= containerRectForScroll.right) {
+        if (scrollIntervalRef.current === null) {
+            scrollIntervalRef.current = window.setInterval(() => {
+                const distanceToEdge = containerRectForScroll.right - clientX;
+                const speed = maxScrollSpeed * (1 - (distanceToEdge / scrollTriggerZone));
+                ganttContainer.scrollLeft += speed;
+            }, 15);
+        }
+    } else if (clientX < containerRectForScroll.left + scrollTriggerZone && clientX >= containerRectForScroll.left) {
+        if (scrollIntervalRef.current === null) {
+            scrollIntervalRef.current = window.setInterval(() => {
+                const distanceToEdge = clientX - containerRectForScroll.left;
+                const speed = maxScrollSpeed * (1 - (distanceToEdge / scrollTriggerZone));
+                ganttContainer.scrollLeft -= speed;
+            }, 15);
+        }
+    } else {
+        stopAutoScroll();
+    }
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>, targetLineId: string) => {
     e.preventDefault();
+    stopAutoScroll();
     if (!draggedItem || !isDropValid) {
       onUpdateFeedback(isDropValid === false ? 'Não é possível soltar aqui. Posição inválida.' : 'Item arrastado não encontrado ou drop inválido.', 'error');
       setDraggedItem(null);
@@ -439,6 +489,7 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
   };
 
   const handleDragEnd = () => {
+    stopAutoScroll();
     const ghost = document.querySelector('.drag-ghost-image');
     if (ghost && ghost.parentElement) {
       ghost.parentElement.removeChild(ghost);
@@ -526,10 +577,10 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                         bandEndMinutesInDay = 24 * 60;
                     }
 
-                    const bandStartMinutesFromViewStart = (d * hoursPerDay * 60) + bandStartMinutesInDay;
                     const bandDurationMinutes = bandEndMinutesInDay - bandStartMinutesInDay;
 
                     if (bandDurationMinutes > 0) {
+                      const bandStartMinutesFromViewStart = (d * hoursPerDay * 60) + bandStartMinutesInDay;
                       dailyOpBands.push(
                           <div
                               key={`${line.id}-op-${d}`}
@@ -573,13 +624,6 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                   const isTopSeller = product?.classification === 'Top Seller';
                   const isDraggable = !isTopSeller && scheduleItem.status === 'Pendente';
                   const isLocked = isTopSeller || scheduleItem.status !== 'Pendente';
-
-                  let baseBgColor = 'bg-sky-500';
-                  if (isTopSeller) baseBgColor = 'bg-amber-500';
-                  else if (scheduleItem.status === 'Em Progresso') baseBgColor = 'bg-blue-500';
-                  else if (scheduleItem.status === 'Concluído') baseBgColor = 'bg-emerald-500';
-                  else if (scheduleItem.status === 'Cancelado') baseBgColor = 'bg-red-400';
-                  else if (scheduleItem.status !== 'Pendente') baseBgColor = 'bg-slate-400';
                   
                   const operationalSegments = getOperationalSegments(
                     itemStartTime, 
@@ -611,15 +655,40 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                           const segmentWidthPixels = minutesToPixels(segmentDurationMinutes);
                           
                           if (segmentWidthPixels <= 0) return null;
+                          
+                          // --- Style Calculation ---
+                          const isCompletedOrCancelled = scheduleItem.status === 'Concluído' || scheduleItem.status === 'Cancelado';
+                          const customColor = product?.ganttBarColor;
+
+                          const barStyle: React.CSSProperties = {
+                              left: `${segmentLeftPixelsRelativeToParent}px`,
+                              width: `${segmentWidthPixels}px`,
+                          };
+                          let barClasses = 'absolute top-0 h-full rounded shadow-md p-2 text-xs overflow-hidden flex items-center justify-between transition-all duration-150';
+
+                          if (customColor) {
+                              barStyle.backgroundColor = customColor;
+                              barStyle.color = getContrastingTextColor(customColor);
+                          } else {
+                              let fallbackBgColor = 'bg-sky-500'; // Pendente (Normal)
+                              if (isTopSeller) fallbackBgColor = 'bg-amber-500'; // Pendente (Top Seller)
+                              else if (scheduleItem.status === 'Em Progresso') fallbackBgColor = 'bg-blue-500';
+                              else if (scheduleItem.status === 'Concluído') fallbackBgColor = 'bg-emerald-500';
+                              else if (scheduleItem.status === 'Cancelado') fallbackBgColor = 'bg-red-400';
+                              else if (scheduleItem.status !== 'Pendente') fallbackBgColor = 'bg-slate-400';
+                              barClasses += ` ${fallbackBgColor} text-white`;
+                          }
+                          
+                          if (isDraggable) barClasses += ' hover:brightness-110';
+                          if (isTopSeller) barClasses += ' border-2 border-yellow-300';
+                          if (isCompletedOrCancelled) barStyle.opacity = 0.65;
+                          // --- End Style Calculation ---
 
                           return (
                             <div
                                 key={index}
-                                className={`absolute top-0 h-full rounded shadow-md p-2 text-white text-xs overflow-hidden flex items-center justify-between ${baseBgColor} ${isDraggable ? 'hover:brightness-110' : ''}`}
-                                style={{
-                                    left: `${segmentLeftPixelsRelativeToParent}px`,
-                                    width: `${segmentWidthPixels}px`,
-                                }}
+                                className={barClasses}
+                                style={barStyle}
                             >
                                 {index === 0 && ( /* Show text only on the first segment */
                                     <>
