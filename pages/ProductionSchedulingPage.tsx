@@ -9,7 +9,7 @@ import Select from '../components/shared/Select';
 import Textarea from '../components/shared/Textarea';
 import Card from '../components/shared/Card';
 import Alert from '../components/shared/Alert';
-import { PlusIcon, PencilIcon, TrashIcon, CogIcon } from '../components/icons'; // Added CogIcon
+import { PlusIcon, PencilIcon, TrashIcon, CogIcon, CheckCircleIcon } from '../components/icons';
 
 const daysOfWeekNamesShort = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 
@@ -358,7 +358,9 @@ const ProductionSchedulingPage: React.FC = () => {
     optimizeDaySchedules, 
     products, getProductById,
     productionLines, getProductionLineById,
-    addWorkingTime // Destructure addWorkingTime from context
+    addWorkingTime,
+    finishScheduleNow,
+    isLoading
   } = useAppData();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<ScheduledProductionRun | undefined>(undefined);
@@ -477,6 +479,17 @@ const ProductionSchedulingPage: React.FC = () => {
     setIsOptimizeConfirmOpen(false);
   };
 
+  const handleFinishEarly = async (scheduleId: string) => {
+    setPageError(null);
+    setOptimizationResult(null);
+    const result = await finishScheduleNow(scheduleId);
+    setOptimizationResult({
+        message: result.message || (result.success ? 'Produção finalizada com sucesso.' : 'Ocorreu um erro ao tentar finalizar a produção.'),
+        type: result.success ? 'success' : 'error',
+    });
+    setTimeout(() => setOptimizationResult(null), 7000);
+  };
+
 
   const handleSubmitForm = (data: Omit<ScheduledProductionRun, 'id'> | ScheduledProductionRun) => {
     if ('id' in data) {
@@ -561,6 +574,18 @@ const ProductionSchedulingPage: React.FC = () => {
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-1">
+                        {item.status === 'Em Progresso' && (
+                            <Button
+                                aria-label={`Finalizar agora agendamento de ${product?.name || 'produto'}`}
+                                size="sm"
+                                variant="success"
+                                onClick={() => handleFinishEarly(item.id)}
+                                leftIcon={<CheckCircleIcon className="w-4 h-4" />}
+                                isLoading={isLoading}
+                            >
+                                Finalizar
+                            </Button>
+                        )}
                         {canEdit && (
                           <Button aria-label={`Editar agendamento de ${product?.name || 'produto'}`} size="sm" variant="ghost" onClick={() => handleEditSchedule(item)} leftIcon={<PencilIcon className="w-4 h-4" />}>Editar</Button>
                         )}
