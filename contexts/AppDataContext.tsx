@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, ReactNode, useEffect, useState, useCallback } from 'react';
 import { supabase } from '../supabaseClient';
 import { 
@@ -27,6 +26,7 @@ interface DbProduct {
   processing_times: Array<{ equipmentId: string; timePerUnitMinutes: number; }>; // JSONB
   classification: ProductClassification;
   manufactured_for?: string;
+  gantt_bar_color?: string; // Added color field
   created_at?: string;
   updated_at?: string;
 }
@@ -37,6 +37,7 @@ interface DbProductionLine {
   description?: string;
   equipment_ids: string[]; // UUID[]
   operating_hours: OperatingDayTime[]; // JSONB
+  display_order?: number;
   created_at?: string;
   updated_at?: string;
   // Pause fields
@@ -98,6 +99,7 @@ const mapDbToProduct = (db: DbProduct): Product => ({
   processingTimes: db.processing_times || [],
   classification: db.classification,
   manufacturedFor: db.manufactured_for,
+  ganttBarColor: db.gantt_bar_color,
   createdAt: db.created_at,
   updatedAt: db.updated_at,
 });
@@ -110,6 +112,7 @@ const mapProductToDb = (p: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>): Omi
   processing_times: p.processingTimes,
   classification: p.classification,
   manufactured_for: p.manufacturedFor,
+  gantt_bar_color: p.ganttBarColor,
 });
 
 const mapDbToProductionLine = (db: DbProductionLine): ProductionLine => ({
@@ -118,6 +121,7 @@ const mapDbToProductionLine = (db: DbProductionLine): ProductionLine => ({
   description: db.description,
   equipmentIds: db.equipment_ids || [],
   operatingHours: db.operating_hours || [],
+  displayOrder: db.display_order ?? 0,
   createdAt: db.created_at,
   updatedAt: db.updated_at,
   isPaused: db.is_paused,
@@ -131,6 +135,7 @@ const mapProductionLineToDb = (pl: Omit<ProductionLine, 'id' | 'createdAt' | 'up
   description: pl.description,
   equipment_ids: pl.equipmentIds,
   operating_hours: pl.operatingHours,
+  display_order: pl.displayOrder,
   is_paused: pl.isPaused,
   current_pause_start_time: pl.currentPauseStartTime,
   current_pause_reason: pl.currentPauseReason,
@@ -188,6 +193,7 @@ interface AppDataContextType {
   productionLines: ProductionLine[];
   addProductionLine: (item: Pick<ProductionLine, 'name' | 'description' | 'operatingHours'>) => Promise<ProductionLine | null>;
   updateProductionLine: (item: ProductionLine, shouldRefetch?: boolean) => Promise<ProductionLine | null>;
+  updateProductionLinesOrder: (lines: ProductionLine[]) => Promise<void>;
   deleteProductionLine: (id: string) => Promise<void>;
   getProductionLineById: (id: string) => ProductionLine | undefined;
   pauseLine: (lineId: string, reason: string) => Promise<{ success: boolean; message?: string }>;
@@ -201,7 +207,7 @@ interface AppDataContextType {
   getScheduleById: (id: string) => ScheduledProductionRun | undefined;
   finishScheduleNow: (scheduleId: string) => Promise<{ success: boolean; message?: string }>;
   
-  optimizeDaySchedules: (dateToOptimize: Date) => Promise<{
+  optimizeDaySchedules: (dateToOptimize: Date, targetLineId?: string) => Promise<{
     optimizedCount: number;
     unoptimizedCount: number;
     details: string[];
@@ -215,6 +221,7 @@ interface AppDataContextType {
   isLoading: boolean;
   error: Error | null;
   fetchInitialData: () => Promise<void>;
+  hasDisplayOrderFeature: boolean;
 }
 
 const AppDataContext = createContext<AppDataContextType | undefined>(undefined);
@@ -227,6 +234,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
   const [schedules, setSchedules] = useState<ScheduledProductionRun[]>([]);
   const [linePauseHistory, setLinePauseHistory] = useState<LinePauseHistoryEntry[]>([]);
   
+  const [hasDisplayOrderFeature, setHasDisplayOrderFeature] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [errorState, setErrorState] = useState<Error | null>(null);
 
@@ -254,9 +262,21 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
       if (productsError) throw productsError;
       setProducts(productsData.map(mapDbToProduct));
 
-      const { data: linesData, error: linesError } = await supabase.from('production_lines').select('*').order('name');
-      if (linesError) throw linesError;
-      setProductionLines(linesData.map(mapDbToProductionLine));
+      const { data: linesData, error: linesError } = await supabase.from('production_lines').select('*').order('display_order', { nullsFirst: true }).order('name');
+      if (linesError) {
+        if (linesError.code === '42703' && linesError.message.includes('display_order')) {
+          console.warn("SmartShaker Dev Message: A coluna 'display_order' não foi encontrada na tabela 'production_lines'. O recurso de ordenação manual de linhas não será persistido. Para habilitar, adicione uma coluna numérica chamada 'display_order' à sua tabela 'production_lines' no Supabase.");
+          setHasDisplayOrderFeature(false);
+          const { data: fallbackLinesData, error: fallbackLinesError } = await supabase.from('production_lines').select('*').order('name');
+          if (fallbackLinesError) throw fallbackLinesError;
+          setProductionLines(fallbackLinesData.map(mapDbToProductionLine));
+        } else {
+          throw linesError;
+        }
+      } else {
+        setHasDisplayOrderFeature(true);
+        setProductionLines(linesData.map(mapDbToProductionLine));
+      }
       
       const { data: schedulesData, error: schedulesError } = await supabase.from('scheduled_production_runs').select('*').order('start_time');
       if (schedulesError) throw schedulesError;
@@ -389,30 +409,69 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
 
   // --- Production Line Operations ---
   const addProductionLineOp = useCallback(async (item: Pick<ProductionLine, 'name' | 'description' | 'operatingHours'>): Promise<ProductionLine | null> => {
-    const dbItem = mapProductionLineToDb({ ...item, equipmentIds: [] }); 
+    const maxOrder = productionLines.reduce((max, line) => Math.max(max, line.displayOrder), -1);
+    const newLineData: Omit<ProductionLine, 'id' | 'createdAt' | 'updatedAt'> = {
+        ...item,
+        equipmentIds: [],
+        displayOrder: maxOrder + 1,
+    };
+    const dbItem = mapProductionLineToDb(newLineData);
+    if (!hasDisplayOrderFeature) {
+        delete (dbItem as Partial<DbProductionLine>).display_order;
+    }
     const { data, error: plError } = await supabase.from('production_lines').insert({ ...dbItem, id: generateUUID() }).select().single();
     if (plError) { handleError('addProductionLine', plError); return null; }
     if (data) {
         const newLine = mapDbToProductionLine(data as DbProductionLine);
-        setProductionLines(prev => [...prev, newLine].sort((a,b) => a.name.localeCompare(b.name)));
+        setProductionLines(prev => [...prev, newLine].sort((a, b) => a.displayOrder - b.displayOrder || a.name.localeCompare(b.name)));
         return newLine;
     }
     return null;
-  }, [handleError]);
+  }, [handleError, productionLines, hasDisplayOrderFeature]);
 
   const updateProductionLineOp = useCallback(async (item: ProductionLine, shouldRefetch: boolean = false): Promise<ProductionLine | null> => {
     const { id, createdAt, updatedAt, ...rest } = item;
     const dbItem = mapProductionLineToDb(rest);
+    if (!hasDisplayOrderFeature) {
+        delete (dbItem as Partial<DbProductionLine>).display_order;
+    }
     const { data, error: plError } = await supabase.from('production_lines').update(dbItem).eq('id', id).select().single();
     if (plError) { handleError('updateProductionLine', plError); return null; }
     if (data) {
         const updatedLine = mapDbToProductionLine(data as DbProductionLine);
-        setProductionLines(prev => prev.map(l => l.id === id ? updatedLine : l).sort((a,b) => a.name.localeCompare(b.name)));
+        setProductionLines(prev => prev.map(l => l.id === id ? updatedLine : l).sort((a, b) => a.displayOrder - b.displayOrder || a.name.localeCompare(b.name)));
         if (shouldRefetch) await fetchInitialData(); 
         return updatedLine;
     }
     return null;
-  }, [handleError, fetchInitialData]);
+  }, [handleError, fetchInitialData, hasDisplayOrderFeature]);
+
+  const updateProductionLinesOrderOp = useCallback(async (orderedLines: ProductionLine[]) => {
+    // Optimistically update the UI
+    const reorderedLinesWithIndex = orderedLines.map((line, index) => ({ ...line, displayOrder: index }));
+    setProductionLines(reorderedLinesWithIndex);
+
+    if (!hasDisplayOrderFeature) {
+        return;
+    }
+
+    // Prepare full objects for upsert to avoid not-null constraint violations
+    const updates = reorderedLinesWithIndex.map(line => {
+      const { id, createdAt, updatedAt, ...rest } = line;
+      const dbItem = mapProductionLineToDb(rest);
+      // The upsert needs the primary key `id` to identify which row to update.
+      return { id, ...dbItem }; 
+    });
+    
+    const { error: updateError } = await supabase.from('production_lines').upsert(updates);
+    
+    if (updateError) {
+        handleError('updateProductionLinesOrder', updateError, 'Falha ao atualizar a ordem das linhas.');
+        // Revert optimistic update on error by fetching fresh data
+        await fetchInitialData(); 
+        return;
+    }
+  }, [handleError, fetchInitialData, hasDisplayOrderFeature]);
 
   const deleteProductionLineOp = useCallback(async (id: string) => {
     const schedulesOnLine = schedules.filter(s => s.lineId === id);
@@ -498,7 +557,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
         l.id === lineId
           ? { ...l, ...mapDbToProductionLine({ ...lineToPause, ...updatePayload } as unknown as DbProductionLine) } 
           : l
-      ).sort((a,b) => a.name.localeCompare(b.name))
+      ).sort((a,b) => a.displayOrder - b.displayOrder || a.name.localeCompare(b.name))
     );
     return { success: true, message: `Linha "${lineToPause.name}" pausada com sucesso.` };
   }, [productionLines, user, handleError]);
@@ -718,7 +777,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
     return { success: true, message: finalMessage };
   }, [productionLines, user, handleError, schedules, getProductByIdOp, fetchInitialData, addWorkingTime, calculateEffectiveWorkDuration]);
 
-  const optimizeDaySchedulesOp = useCallback(async (dateToOptimize: Date): Promise<{ optimizedCount: number; unoptimizedCount: number; details: string[] }> => {
+  const optimizeDaySchedulesOp = useCallback(async (dateToOptimize: Date, targetLineId?: string): Promise<{ optimizedCount: number; unoptimizedCount: number; details: string[] }> => {
     setIsLoading(true);
     let optimizedCount = 0;
     let unoptimizedCount = 0;
@@ -739,7 +798,15 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
         .map(id => getProductionLineByIdOp(id))
         .filter((l): l is ProductionLine => l !== undefined);
 
-    for (const line of linesInUseToday) {
+    const linesToOptimize = targetLineId
+        ? linesInUseToday.filter(line => line.id === targetLineId)
+        : linesInUseToday;
+    
+    if (targetLineId && linesToOptimize.length === 0) {
+        details.push(`A linha selecionada não tem agendamentos para otimizar hoje.`);
+    }
+
+    for (const line of linesToOptimize) {
         if (line.isPaused) {
             details.push(`Linha ${line.name} está pausada e foi ignorada na otimização.`);
             continue;
@@ -900,7 +967,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
     <AppDataContext.Provider value={{
       equipment, addEquipment: addEquipmentOp, updateEquipment: updateEquipmentOp, deleteEquipment: deleteEquipmentOp, getEquipmentById: getEquipmentByIdOp,
       products, addProduct: addProductOp, updateProduct: updateProductOp, deleteProduct: deleteProductOp, getProductById: getProductByIdOp,
-      productionLines, addProductionLine: addProductionLineOp, updateProductionLine: updateProductionLineOp, deleteProductionLine: deleteProductionLineOp, getProductionLineById: getProductionLineByIdOp,
+      productionLines, addProductionLine: addProductionLineOp, updateProductionLine: updateProductionLineOp, updateProductionLinesOrder: updateProductionLinesOrderOp, deleteProductionLine: deleteProductionLineOp, getProductionLineById: getProductionLineByIdOp,
       schedules, addSchedule: addScheduleOp, updateSchedule: updateScheduleOp, deleteSchedule: deleteScheduleOp, getScheduleById: getScheduleByIdOp,
       finishScheduleNow: finishScheduleNowOp,
       pauseLine: pauseLineOp,
@@ -912,6 +979,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
       isLoading,
       error: errorState,
       fetchInitialData,
+      hasDisplayOrderFeature,
     }}>
       {children}
     </AppDataContext.Provider>
