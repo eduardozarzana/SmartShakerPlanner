@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, ReactNode, useEffect, useState, useCallback } from 'react';
 import { supabase } from '../supabaseClient';
 import { 
@@ -722,106 +721,124 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
     let optimizedCount = 0;
     let unoptimizedCount = 0;
     let details: string[] = [];
+
     const startOfDay = new Date(dateToOptimize);
     startOfDay.setHours(0, 0, 0, 0);
+
     const endOfDay = new Date(dateToOptimize);
     endOfDay.setHours(23, 59, 59, 999);
-    const schedulesForDay = schedules.filter(s => {
-      const sDate = new Date(s.startTime);
-      return sDate >= startOfDay && sDate <= endOfDay;
-    }).sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
-    const linesInUseToday = [...new Set(schedulesForDay.map(s => s.lineId))].map(id => getProductionLineByIdOp(id)).filter(l => l !== undefined) as ProductionLine[];
-    for (const line of linesInUseToday) {
-      if (line.isPaused) {
-        details.push(`Linha ${line.name} está pausada e foi ignorada na otimização.`);
-        continue;
-      }
-      const lineSchedules = schedulesForDay.filter(s => s.lineId === line.id).sort((a, b) => {
-            const productA = getProductByIdOp(a.productId);
-            const productB = getProductByIdOp(b.productId);
-            if (productA?.classification === 'Top Seller' && productB?.classification !== 'Top Seller') return -1;
-            if (productA?.classification !== 'Top Seller' && productB?.classification === 'Top Seller') return 1;
-            return new Date(a.startTime).getTime() - new Date(b.startTime).getTime();
-        });
-      let lastEndTimeOnLine = new Date(startOfDay); 
-      for (const schedule of lineSchedules) {
-        const product = getProductByIdOp(schedule.productId);
-        if (!product) {
-          details.push(`Produto ID ${schedule.productId} não encontrado para o agendamento ${schedule.id}.`);
-          unoptimizedCount++;
-          continue;
-        }
-        if (product.classification === 'Top Seller' || schedule.status !== 'Pendente') {
-           const scheduleEndTime = new Date(schedule.endTime);
-           if (scheduleEndTime > lastEndTimeOnLine) lastEndTimeOnLine = scheduleEndTime;
-          continue; 
-        }
-        
-        const originalEffectiveDurationMinutes = calculateEffectiveWorkDuration(new Date(schedule.startTime), new Date(schedule.endTime), line);
 
-        let proposedStartTime = new Date(lastEndTimeOnLine);
-        let newStartTime = addWorkingTime(proposedStartTime, 0, line); 
-        if (newStartTime.getDate() !== startOfDay.getDate()) {
-            details.push(`Agendamento ${schedule.id} (${product.name}) não pôde ser encaixado em ${line.name} hoje. Tentando manter horário original.`);
-             const originalStartTimeCheck = new Date(schedule.startTime);
-             const canKeepOriginal = originalStartTimeCheck >= lastEndTimeOnLine && addWorkingTime(originalStartTimeCheck, originalEffectiveDurationMinutes, line) <= endOfDay;
-            if(canKeepOriginal) { lastEndTimeOnLine = addWorkingTime(originalStartTimeCheck, originalEffectiveDurationMinutes, line); } else { unoptimizedCount++; }
+    const schedulesForDay = schedules.filter(s => {
+        const sDate = new Date(s.startTime);
+        return sDate >= startOfDay && sDate <= endOfDay;
+    });
+
+    const linesInUseToday = [...new Set(schedulesForDay.map(s => s.lineId))]
+        .map(id => getProductionLineByIdOp(id))
+        .filter(l => l !== undefined) as ProductionLine[];
+
+    for (const line of linesInUseToday) {
+        if (line.isPaused) {
+            details.push(`Linha ${line.name} está pausada e foi ignorada na otimização.`);
             continue;
         }
-        let newEndTime = addWorkingTime(newStartTime, originalEffectiveDurationMinutes, line);
-        let conflictWithFixed = false;
-        if (newEndTime > endOfDay) {
-             conflictWithFixed = true; 
-             details.push(`Agendamento ${schedule.id} (${product.name}) otimizado para ${newStartTime.toLocaleTimeString('pt-BR')} em ${line.name} extrapolaria o dia.`);
-        } else {
-            for (const nextSchedule of lineSchedules) {
-                if (nextSchedule.id === schedule.id) continue; 
-                const nextProduct = getProductByIdOp(nextSchedule.productId);
-                if (nextProduct?.classification === 'Top Seller' || nextSchedule.status !== 'Pendente') {
-                    const nextScheduleStart = new Date(nextSchedule.startTime);
-                    const nextScheduleEnd = new Date(nextSchedule.endTime);
-                    if (newStartTime < nextScheduleEnd && newEndTime > nextScheduleStart) {
-                        conflictWithFixed = true;
-                        details.push(`Conflito ao otimizar ${schedule.id} (${product.name}): colide com ${nextSchedule.id} (${nextProduct.name}) em ${line.name}.`);
-                        break;
+
+        const lineSchedules = schedulesForDay
+            .filter(s => s.lineId === line.id)
+            .sort((a, b) => {
+                const productA = getProductByIdOp(a.productId);
+                const productB = getProductByIdOp(b.productId);
+                if (productA?.classification === 'Top Seller' && productB?.classification !== 'Top Seller') return -1;
+                if (productA?.classification !== 'Top Seller' && productB?.classification === 'Top Seller') return 1;
+                return new Date(a.startTime).getTime() - new Date(b.startTime).getTime();
+            });
+
+        const now = new Date();
+        const isOptimizingToday = startOfDay.toDateString() === now.toDateString();
+        
+        let lastEndTimeOnLine = isOptimizingToday ? new Date(now) : new Date(startOfDay);
+
+        const fixedSchedulesOnLine = lineSchedules.filter(s => {
+            const product = getProductByIdOp(s.productId);
+            return product?.classification === 'Top Seller' || s.status !== 'Pendente';
+        });
+
+        for (const schedule of lineSchedules) {
+            const product = getProductByIdOp(schedule.productId);
+
+            if (!product) {
+                details.push(`Produto ID ${schedule.productId} não encontrado para o agendamento ${schedule.id}.`);
+                unoptimizedCount++;
+                continue;
+            }
+
+            if (fixedSchedulesOnLine.some(fs => fs.id === schedule.id)) {
+                const scheduleEndTime = new Date(schedule.endTime);
+                if (scheduleEndTime > lastEndTimeOnLine) {
+                    lastEndTimeOnLine = scheduleEndTime;
+                }
+                continue;
+            }
+
+            const originalEffectiveDurationMinutes = calculateEffectiveWorkDuration(new Date(schedule.startTime), new Date(schedule.endTime), line);
+            if (originalEffectiveDurationMinutes <= 0) {
+                const scheduleEndTime = new Date(schedule.endTime);
+                if (scheduleEndTime > lastEndTimeOnLine) lastEndTimeOnLine = scheduleEndTime;
+                continue;
+            }
+
+            let newStartTime = addWorkingTime(new Date(lastEndTimeOnLine), 0, line);
+            
+            if (isOptimizingToday && newStartTime < now) {
+                newStartTime = addWorkingTime(new Date(now), 0, line);
+            }
+
+            const newEndTime = addWorkingTime(new Date(newStartTime), originalEffectiveDurationMinutes, line);
+
+            let conflictWithFixed = false;
+            for (const fixedSchedule of fixedSchedulesOnLine) {
+                const fixedStart = new Date(fixedSchedule.startTime);
+                const fixedEnd = new Date(fixedSchedule.endTime);
+                if (newStartTime < fixedEnd && fixedStart < newEndTime) {
+                    conflictWithFixed = true;
+                    const fixedProduct = getProductByIdOp(fixedSchedule.productId);
+                    details.push(`Conflito ao otimizar ${schedule.id} (${product.name}): colide com o agendamento fixo de ${fixedProduct?.name || 'N/D'} em ${line.name}.`);
+                    break;
+                }
+            }
+
+            if (!conflictWithFixed) {
+                if (newStartTime.toISOString() !== schedule.startTime || newEndTime.toISOString() !== schedule.endTime) {
+                    const updateResult = await updateScheduleOp({ ...schedule, startTime: newStartTime.toISOString(), endTime: newEndTime.toISOString() });
+                    if (updateResult) {
+                        optimizedCount++;
+                        details.push(`Agendamento ${schedule.id} (${product.name}) otimizado para ${newStartTime.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} em ${line.name}.`);
+                    } else {
+                        unoptimizedCount++;
+                        details.push(`Falha ao atualizar agendamento ${schedule.id} (${product.name}) durante otimização.`);
+                        const originalEndTime = new Date(schedule.endTime);
+                        if (originalEndTime > lastEndTimeOnLine) {
+                            lastEndTimeOnLine = originalEndTime;
+                        }
+                        continue;
                     }
                 }
-            }
-        }
-        if (!conflictWithFixed) {
-            if (newStartTime.toISOString() !== schedule.startTime || newEndTime.toISOString() !== schedule.endTime) {
-                const updateResult = await updateScheduleOp({ ...schedule, startTime: newStartTime.toISOString(), endTime: newEndTime.toISOString(), });
-                if (updateResult) {
-                    optimizedCount++;
-                    details.push(`Agendamento ${schedule.id} (${product.name}) otimizado para ${newStartTime.toLocaleTimeString('pt-BR')} em ${line.name}.`);
-                } else {
-                    unoptimizedCount++;
-                    details.push(`Falha ao atualizar agendamento ${schedule.id} (${product.name}) durante otimização.`);
-                    newEndTime = new Date(schedule.endTime); 
+                lastEndTimeOnLine = newEndTime;
+            } else {
+                unoptimizedCount++;
+                const originalEndTime = new Date(schedule.endTime);
+                if (originalEndTime > lastEndTimeOnLine) {
+                    lastEndTimeOnLine = originalEndTime;
                 }
             }
-            lastEndTimeOnLine = newEndTime;
-        } else {
-            unoptimizedCount++;
-            const originalStartTimeCheck = new Date(schedule.startTime);
-            if (originalStartTimeCheck >= lastEndTimeOnLine) {
-                 const originalEndTimeCheck = addWorkingTime(originalStartTimeCheck, originalEffectiveDurationMinutes, line);
-                 if (!lineSchedules.some(ns => { 
-                    if (ns.id === schedule.id) return false;
-                    const nsp = getProductByIdOp(ns.productId);
-                    if (nsp?.classification === 'Top Seller' || ns.status !== 'Pendente') {
-                         const nss = new Date(ns.startTime); const nse = new Date(ns.endTime);
-                         return originalStartTimeCheck < nse && originalEndTimeCheck > nss;
-                    } return false;
-                 })) { lastEndTimeOnLine = originalEndTimeCheck; }
-            }
         }
-      }
     }
+
     setIsLoading(false);
-    await fetchInitialData(); 
+    await fetchInitialData();
     return { optimizedCount, unoptimizedCount, details };
-  }, [schedules, getProductionLineByIdOp, getProductByIdOp, updateScheduleOp, fetchInitialData, addWorkingTime, calculateEffectiveWorkDuration]);
+}, [schedules, getProductionLineByIdOp, getProductByIdOp, updateScheduleOp, fetchInitialData, addWorkingTime, calculateEffectiveWorkDuration]);
+
 
   // Effect for automatic schedule status updates
   useEffect(() => {
@@ -840,7 +857,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
           updateScheduleOp({ ...schedule, status: 'Em Progresso' });
         }
       });
-    }, 60000); // Check every minute
+    }, 60000); // Check every minutea
 
     return () => clearInterval(timer);
   }, [schedules, updateScheduleOp, getProductByIdOp]); 
