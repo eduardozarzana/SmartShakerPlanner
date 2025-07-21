@@ -19,6 +19,7 @@ export interface Product {
   processingTimes: Array<{ equipmentId: string; timePerUnitMinutes: number; }>;
   classification: ProductClassification; // Added classification
   manufacturedFor?: string; // Added new field
+  ganttBarColor?: string; // Color for the Gantt chart bar (e.g., '#ff0000')
   createdAt?: string; // ISO datetime string
   updatedAt?: string; // ISO datetime string
 }
@@ -38,6 +39,7 @@ export interface ProductionLine {
   operatingHours: OperatingDayTime[]; // Array of 7, one for each day
   createdAt?: string; // ISO datetime string
   updatedAt?: string; // ISO datetime string
+  displayOrder: number; // For manual sorting
   // Fields for pause functionality
   isPaused?: boolean;
   currentPauseStartTime?: string | null; // ISO datetime string
