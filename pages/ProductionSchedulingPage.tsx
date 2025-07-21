@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useEffect } from 'react';
 import { useAppData } from '../contexts/AppDataContext';
 import { ScheduledProductionRun, Product, ProductionLine, SelectOption, ScheduleStatus, Equipment, OperatingDayTime } from '../types';
@@ -370,6 +369,7 @@ const ProductionSchedulingPage: React.FC = () => {
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [scheduleToDelete, setScheduleToDelete] = useState<ScheduledProductionRun | null>(null);
   const [isOptimizeConfirmOpen, setIsOptimizeConfirmOpen] = useState(false);
+  const [optimizeScope, setOptimizeScope] = useState<string>('all');
 
 
   const sortedSchedules = useMemo(() => {
@@ -384,6 +384,28 @@ const ProductionSchedulingPage: React.FC = () => {
     return sortedSchedules.filter(s => s.status === 'Concluído' || s.status === 'Cancelado');
   }, [sortedSchedules]);
 
+  const linesWithOptionsForToday = useMemo(() => {
+    const today = new Date();
+    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+
+    const linesInUseIds = new Set(
+        schedules
+            .filter(s => {
+                const sDate = new Date(s.startTime);
+                return sDate >= startOfDay && sDate <= endOfDay;
+            })
+            .map(s => s.lineId)
+    );
+
+    const options: SelectOption[] = [{ value: 'all', label: 'Otimizar Todas as Linhas Ativas' }];
+    productionLines.forEach(line => {
+        if (linesInUseIds.has(line.id)) {
+            options.push({ value: line.id, label: `Otimizar Apenas: ${line.name}` });
+        }
+    });
+    return options;
+  }, [schedules, productionLines]);
 
   const handleAddSchedule = () => {
     setPageError(null); 
@@ -455,16 +477,17 @@ const ProductionSchedulingPage: React.FC = () => {
         setOptimizationResult({ message: "Nenhum agendamento para hoje. Nada a otimizar.", type: 'info' });
         return;
     }
-     if (!todaySchedules.some(s => getProductById(s.productId)?.classification === 'Normal')) {
-        setOptimizationResult({ message: "Nenhum produto 'Normal' agendado para hoje. Nada a otimizar.", type: 'info' });
+     if (!todaySchedules.some(s => getProductById(s.productId)?.classification === 'Normal' && s.status === 'Pendente')) {
+        setOptimizationResult({ message: "Nenhum produto 'Normal' com status 'Pendente' agendado para hoje. Nada a otimizar.", type: 'info' });
         return;
     }
+    setOptimizeScope('all');
     setIsOptimizeConfirmOpen(true);
   };
 
   const confirmOptimizeAndCloseModal = async () => {
     const today = new Date();
-    const result = await optimizeDaySchedules(today);
+    const result = await optimizeDaySchedules(today, optimizeScope === 'all' ? undefined : optimizeScope);
     let message = `Otimização concluída para ${today.toLocaleDateString('pt-BR')}: ${result.optimizedCount} agendamento(s) 'Normal' otimizado(s).`;
     if (result.unoptimizedCount > 0) {
         message += ` ${result.unoptimizedCount} agendamento(s) 'Normal' não puderam ser otimizados e mantiveram seus horários.`;
@@ -606,7 +629,7 @@ const ProductionSchedulingPage: React.FC = () => {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap gap-2 justify-end">
-        <Button onClick={handleOpenOptimizeConfirm} variant="secondary" leftIcon={<CogIcon className="w-5 h-5"/>}>
+        <Button onClick={handleOpenOptimizeConfirm} variant="secondary" leftIcon={<CogIcon className="w-5 h-5"/>} isLoading={isLoading}>
           Otimizar Horários (Hoje)
         </Button>
         <Button onClick={handleAddSchedule} leftIcon={<PlusIcon className="w-5 h-5"/>}>
@@ -675,18 +698,27 @@ const ProductionSchedulingPage: React.FC = () => {
       <Modal
         isOpen={isOptimizeConfirmOpen}
         onClose={() => setIsOptimizeConfirmOpen(false)}
-        title="Confirmar Otimização de Horários"
+        title="Otimizar Horários de Hoje"
       >
-        <p className="text-sm text-gray-700">
-          Tem certeza que deseja otimizar os horários para os produtos normais de <strong>hoje ({new Date().toLocaleDateString('pt-BR')})</strong>?
-          <br />
-          Produtos 'Top Seller' não serão alterados. Esta ação pode reorganizar múltiplos agendamentos 'Normal'.
-        </p>
+        <div className="space-y-4">
+            <p className="text-sm text-gray-700">
+              Selecione o escopo da otimização para hoje <strong>({new Date().toLocaleDateString('pt-BR')})</strong>.
+              <br />
+              Produtos 'Top Seller' e agendamentos com status diferente de 'Pendente' não serão alterados.
+            </p>
+            <Select
+                label="Escopo da Otimização"
+                id="optimize-scope"
+                options={linesWithOptionsForToday}
+                value={optimizeScope}
+                onChange={(e) => setOptimizeScope(e.target.value)}
+            />
+        </div>
         <div className="mt-6 flex justify-end space-x-3">
           <Button variant="secondary" onClick={() => setIsOptimizeConfirmOpen(false)}>
             Cancelar
           </Button>
-          <Button variant="primary" onClick={confirmOptimizeAndCloseModal}>
+          <Button variant="primary" onClick={confirmOptimizeAndCloseModal} isLoading={isLoading}>
             Otimizar Agora
           </Button>
         </div>
