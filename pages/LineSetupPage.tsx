@@ -7,7 +7,7 @@ import Modal from '../components/shared/Modal';
 import Input from '../components/shared/Input';
 import Textarea from '../components/shared/Textarea';
 import Card from '../components/shared/Card';
-import { PlusIcon, PencilIcon, TrashIcon, ChevronUpIcon, ChevronDownIcon, ArrowPathIcon, PlayIcon, PauseIcon } from '../components/icons';
+import { PlusIcon, PencilIcon, TrashIcon, ListIcon, ArrowPathIcon, PlayIcon, PauseIcon } from '../components/icons';
 import Alert from '../components/shared/Alert';
 
 const daysOfWeekNames = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
@@ -125,17 +125,6 @@ const LineEquipmentConfigurator: React.FC<LineEquipmentConfiguratorProps> = ({ l
   const removeEquipmentFromLine = (equipmentId: string) => {
     setLineEquipmentIds(prev => prev.filter(id => id !== equipmentId));
   };
-
-  const moveEquipment = (index: number, direction: 'up' | 'down') => {
-    const newOrder = [...lineEquipmentIds];
-    const item = newOrder.splice(index, 1)[0];
-    if (direction === 'up') {
-      newOrder.splice(Math.max(0, index - 1), 0, item);
-    } else {
-      newOrder.splice(Math.min(newOrder.length, index + 1), 0, item);
-    }
-    setLineEquipmentIds(newOrder);
-  };
   
   const handleSave = () => {
     onSave({ ...line, equipmentIds: lineEquipmentIds });
@@ -170,8 +159,6 @@ const LineEquipmentConfigurator: React.FC<LineEquipmentConfiguratorProps> = ({ l
                     <span className="text-xs text-green-500"> ({eqDetails?.type || 'N/D'})</span>
                   </div>
                   <div className="flex items-center space-x-1">
-                    <Button size="sm" variant="ghost" onClick={() => moveEquipment(index, 'up')} disabled={index === 0} aria-label={`Mover ${eqDetails?.name || 'equipamento'} para cima`}><ChevronUpIcon /></Button>
-                    <Button size="sm" variant="ghost" onClick={() => moveEquipment(index, 'down')} disabled={index === lineEquipmentIds.length - 1} aria-label={`Mover ${eqDetails?.name || 'equipamento'} para baixo`}><ChevronDownIcon /></Button>
                     <Button size="sm" variant="danger" onClick={() => removeEquipmentFromLine(eqId)} aria-label={`Remover ${eqDetails?.name || 'equipamento'} da linha`}><TrashIcon className="w-4 h-4" /></Button>
                   </div>
                 </li>
@@ -218,7 +205,7 @@ const formatOperatingHoursSummary = (operatingHours: OperatingDayTime[]): string
 
 
 const LineSetupPage: React.FC = () => {
-  const { productionLines, addProductionLine, updateProductionLine, deleteProductionLine, getEquipmentById, pauseLine, resumeLine, isLoading } = useAppData();
+  const { productionLines, addProductionLine, updateProductionLine, updateProductionLinesOrder, deleteProductionLine, getEquipmentById, pauseLine, resumeLine, isLoading, hasDisplayOrderFeature } = useAppData();
   const [isInfoModalOpen, setIsInfoModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [editingLine, setEditingLine] = useState<ProductionLine | undefined>(undefined); 
@@ -229,7 +216,46 @@ const LineSetupPage: React.FC = () => {
   const [lineToPauseOrResume, setLineToPauseOrResume] = useState<ProductionLine | null>(null);
   const [pauseReason, setPauseReason] = useState('');
   const [feedbackMessage, setFeedbackMessage] = useState<{type: 'success' | 'error', message: string} | null>(null);
+  const [draggedLineId, setDraggedLineId] = useState<string | null>(null);
 
+  const handleDragStart = (e: React.DragEvent<HTMLDivElement>, line: ProductionLine) => {
+      if (!hasDisplayOrderFeature || line.isPaused || isLoading) {
+          e.preventDefault();
+          return;
+      }
+      setDraggedLineId(line.id);
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', line.id);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+      e.preventDefault(); 
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>, targetLine: ProductionLine) => {
+      e.preventDefault();
+      if (!draggedLineId || draggedLineId === targetLine.id) {
+          setDraggedLineId(null);
+          return;
+      }
+
+      const sourceIndex = productionLines.findIndex(l => l.id === draggedLineId);
+      const targetIndex = productionLines.findIndex(l => l.id === targetLine.id);
+
+      if (sourceIndex === -1 || targetIndex === -1) {
+          setDraggedLineId(null);
+          return;
+      }
+
+      const reorderedLines = [...productionLines];
+      const [removed] = reorderedLines.splice(sourceIndex, 1);
+      reorderedLines.splice(targetIndex, 0, removed);
+
+      const updatedLinesForApi = reorderedLines.map((line, idx) => ({ ...line, displayOrder: idx }));
+      updateProductionLinesOrder(updatedLinesForApi);
+      setDraggedLineId(null);
+  };
+  
   const handleAddLine = () => {
     setFeedbackMessage(null);
     setEditingLine(undefined);
@@ -338,11 +364,20 @@ const LineSetupPage: React.FC = () => {
 
       {productionLines.length > 0 && (
         <div className="space-y-4">
-          {productionLines.map((line) => (
+          {productionLines.map((line, index) => (
             <Card 
                 key={line.id} 
                 title={line.name}
-                className={line.isPaused ? 'border-2 border-amber-500 bg-amber-50 shadow-lg' : 'shadow-md'}
+                draggable={hasDisplayOrderFeature && !line.isPaused && !isLoading}
+                onDragStart={(e) => handleDragStart(e, line)}
+                onDragOver={handleDragOver}
+                onDrop={(e) => handleDrop(e, line)}
+                onDragEnd={() => setDraggedLineId(null)}
+                className={`
+                    ${line.isPaused ? 'border-2 border-amber-500 bg-amber-50 shadow-lg' : 'shadow-md'}
+                    ${draggedLineId === line.id ? 'opacity-40 cursor-grabbing' : 'opacity-100'}
+                    transition-opacity duration-150
+                `}
             >
               <div className="space-y-3">
                 {line.isPaused && (
@@ -372,7 +407,14 @@ const LineSetupPage: React.FC = () => {
                   )}
                 </div>
               </div>
-              <div className="mt-4 pt-4 border-t border-green-200 flex flex-wrap gap-2 justify-end">
+              <div className="mt-4 pt-4 border-t border-green-200 flex flex-wrap gap-2 justify-end items-center">
+                <div className="mr-auto flex items-center">
+                  {hasDisplayOrderFeature && !line.isPaused && !isLoading && (
+                    <div className="cursor-grab p-1" title="Arraste para reordenar">
+                        <ListIcon className="w-6 h-6 text-gray-400" />
+                    </div>
+                  )}
+                </div>
                 {line.isPaused ? (
                     <Button 
                         size="sm" 
