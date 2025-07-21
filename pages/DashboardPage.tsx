@@ -1,12 +1,14 @@
+
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAppData } from '../contexts/AppDataContext';
 import { ROUTES, APP_NAME } from '../constants';
 import Card from '../components/shared/Card';
-import Alert from '../components/shared/Alert'; // Added Alert
-import { WrenchScrewdriverIcon, SupplementBottleIcon, ListIcon, CalendarIcon } from '../components/icons';
+import Alert from '../components/shared/Alert';
+import { WrenchScrewdriverIcon, SupplementBottleIcon, ListIcon, CalendarIcon, CheckCircleIcon } from '../components/icons';
 import { ScheduledProductionRun, Product, ProductionLine, ScheduleStatus } from '../types';
-import GanttChart from '../components/gantt/GanttChart'; // Import the new GanttChart component
+import GanttChart from '../components/gantt/GanttChart';
+import Button from '../components/shared/Button';
 
 const DashboardPage: React.FC = () => {
   const { 
@@ -17,20 +19,22 @@ const DashboardPage: React.FC = () => {
     getProductById, 
     getProductionLineById,
     updateSchedule,
-    addWorkingTime, // Added
-    calculateEffectiveWorkDuration // Added
+    addWorkingTime,
+    calculateEffectiveWorkDuration,
+    finishScheduleNow,
+    isLoading
   } = useAppData();
-  const [currentTimeForGantt, setCurrentTimeForGantt] = useState(new Date()); // For Gantt's current time indicator
+  const [currentTimeForGantt, setCurrentTimeForGantt] = useState(new Date());
   const [ganttFeedback, setGanttFeedback] = useState<{message: string, type: 'success' | 'error' | 'info' } | null>(null);
+  const [dashboardFeedback, setDashboardFeedback] = useState<{message: string, type: 'success' | 'error' | 'info' } | null>(null);
   const ganttContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // This timer is now only for updating the visual current time indicator in Gantt
     const timer = setInterval(() => {
       setCurrentTimeForGantt(new Date());
-    }, 60000); // Update every minute
+    }, 60000);
     return () => clearInterval(timer);
-  }, []); // No dependencies needed for this visual timer if it only sets local state
+  }, []);
 
   const summaryItems = [
     { title: 'Total de Equipamentos', count: equipment.length, link: ROUTES.EQUIPMENT, icon: <WrenchScrewdriverIcon className="w-8 h-8 text-yellow-500" /> },
@@ -41,31 +45,29 @@ const DashboardPage: React.FC = () => {
 
   const ganttViewStartDate = useMemo(() => {
     const now = new Date();
-    now.setDate(now.getDate() - 2); // Start 2 days ago
+    now.setDate(now.getDate() - 2);
     now.setHours(0, 0, 0, 0);
     return now;
   }, []);
 
   const ganttViewEndDate = useMemo(() => {
     const end = new Date(ganttViewStartDate);
-    end.setDate(ganttViewStartDate.getDate() + 6); // Show 6 days (exclusive end for filtering)
+    end.setDate(ganttViewStartDate.getDate() + 6);
     return end;
   }, [ganttViewStartDate]);
   
   const ganttDisplayEndDate = useMemo(() => {
     const end = new Date(ganttViewStartDate);
-    end.setDate(ganttViewStartDate.getDate() + 5); // Last day displayed is start_date + 5 (Today+3)
+    end.setDate(ganttViewStartDate.getDate() + 5);
     end.setHours(23,59,59,999);
     return end;
   }, [ganttViewStartDate]);
-
 
   const schedulesForGanttView = useMemo(() => {
     return schedules
       .filter(s => {
         const scheduleStartTime = new Date(s.startTime);
         const scheduleEndTime = new Date(s.endTime);
-        // Check for overlap: schedule starts before view ends AND schedule ends after view starts
         return scheduleStartTime < ganttViewEndDate && scheduleEndTime > ganttViewStartDate;
       })
       .map(s => { 
@@ -81,28 +83,20 @@ const DashboardPage: React.FC = () => {
   }, [schedules, ganttViewStartDate, ganttViewEndDate, getProductById, getProductionLineById]);
 
   useEffect(() => {
-    // Wait for the ref to be attached and data to be loaded.
     if (ganttContainerRef.current && schedulesForGanttView.length > 0) {
         const now = new Date();
         const oneHourAgo = new Date(now.getTime() - (60 * 60 * 1000));
-        
-        // Check if "one hour ago" is within the view range
         const diffMs = oneHourAgo.getTime() - ganttViewStartDate.getTime();
         
         if (diffMs > 0) {
             const diffMinutes = diffMs / (1000 * 60);
-            
-            const hourWidth = 120; // From GanttChart component
+            const hourWidth = 120;
             const scrollLeftPx = (diffMinutes / 60) * hourWidth;
-            
-            // Scroll to bring "1 hour ago" into view, with a 100px offset from the left edge.
             const desiredPosition = scrollLeftPx - 100; 
-
             ganttContainerRef.current.scrollLeft = Math.max(0, desiredPosition);
         }
     }
-}, [ganttViewStartDate, schedulesForGanttView]); // Re-run if view start date or data changes.
-
+  }, [ganttViewStartDate, schedulesForGanttView]);
 
   const agendaDoDia = useMemo(() => {
     const todayActual = new Date();
@@ -123,15 +117,14 @@ const DashboardPage: React.FC = () => {
       .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
   },[schedules, getProductById, getProductionLineById]);
 
-
   const linhasOcupadas = useMemo(() => {
-    const nowForFilter = new Date(); // Use a fresh 'now' for filtering occupied lines
+    const nowForFilter = new Date();
     return schedules.filter(s => {
       const start = new Date(s.startTime);
       const end = new Date(s.endTime);
       return s.status === 'Em Progresso' && nowForFilter >= start && nowForFilter < end;
     });
-  }, [schedules, currentTimeForGantt]); // currentTimeForGantt can trigger re-check for display
+  }, [schedules, currentTimeForGantt]);
   
   const getStatusColor = (status: ScheduledProductionRun['status']) => {
     switch(status) {
@@ -150,12 +143,27 @@ const DashboardPage: React.FC = () => {
   
   const ganttChartTitle = `Planejamento de Produção - ${ganttViewStartDate.toLocaleDateString('pt-BR')} a ${ganttDisplayEndDate.toLocaleDateString('pt-BR')}`;
 
+  const handleFinishProduction = async (scheduleId: string, productName: string) => {
+    setDashboardFeedback(null);
+    setGanttFeedback(null);
+    const result = await finishScheduleNow(scheduleId);
+    setDashboardFeedback({
+        message: result.message || (result.success ? `Produção de '${productName}' finalizada.` : 'Ocorreu um erro.'),
+        type: result.success ? 'success' : 'error'
+    });
+    setTimeout(() => setDashboardFeedback(null), 7000);
+  };
 
   return (
     <div className="space-y-8">
       <p className="text-lg text-green-700">
         Bem-vindo ao {APP_NAME}!
       </p>
+
+      {dashboardFeedback && (
+          <Alert type={dashboardFeedback.type} message={dashboardFeedback.message} onClose={() => setDashboardFeedback(null)} />
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {summaryItems.map((item) => (
           <Link to={item.link} key={item.title} className="block hover:shadow-xl transition-shadow duration-200">
@@ -189,8 +197,8 @@ const DashboardPage: React.FC = () => {
             getProductById={getProductById}
             getProductionLineById={getProductionLineById}
             onUpdateFeedback={handleGanttUpdateFeedback}
-            addWorkingTime={addWorkingTime} // Added
-            calculateEffectiveWorkDuration={calculateEffectiveWorkDuration} // Added
+            addWorkingTime={addWorkingTime}
+            calculateEffectiveWorkDuration={calculateEffectiveWorkDuration}
           />
         ) : (
           <p className="text-green-600 py-4">
@@ -233,15 +241,28 @@ const DashboardPage: React.FC = () => {
                 const line = getProductionLineById(s.lineId);
                 return (
                   <li key={s.id} className="p-3 bg-yellow-50 rounded-md shadow-sm">
-                    <div className="font-medium text-yellow-800">{line?.name || 'Linha desconhecida'}</div>
-                    <div className="text-sm text-green-700">
-                      Produto: {product?.name || 'Produto desconhecido'} <br/>
-                      Prev. Fim: {new Date(s.endTime).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                    <div>
+                        <div className="font-medium text-yellow-800">{line?.name || 'Linha desconhecida'}</div>
+                        <div className="text-sm text-green-700">
+                          Produto: {product?.name || 'Produto desconhecido'} <br/>
+                          Prev. Fim: {new Date(s.endTime).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                         <div className="mt-1">
+                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusColor(s.status as ScheduleStatus)}`}>
+                                {s.status}
+                            </span>
+                        </div>
                     </div>
-                     <div className="mt-1">
-                        <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusColor(s.status as ScheduleStatus)}`}>
-                            {s.status}
-                        </span>
+                    <div className="mt-3 pt-3 border-t border-yellow-200 flex justify-end">
+                        <Button
+                            size="sm"
+                            variant="success"
+                            onClick={() => handleFinishProduction(s.id, product?.name || 'produto desconhecido')}
+                            leftIcon={<CheckCircleIcon className="w-4 h-4"/>}
+                            isLoading={isLoading}
+                        >
+                            Finalizar Agora
+                        </Button>
                     </div>
                   </li>
                 );
