@@ -540,6 +540,7 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
       paused_by_user_email: user.email,
     };
     const { error: pauseError } = await supabase.from('production_lines').update(updatePayload).eq('id', lineId);
+    
     if (pauseError) {
       let publicMsg = `Falha ao pausar a linha "${lineToPause.name}".`;
       if (pauseError.message.includes("schema cache") && pauseError.message.includes("column")) {
@@ -552,15 +553,12 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
       handleError('pauseLine', pauseError, publicMsg);
       return { success: false, message: publicMsg };
     }
-    setProductionLines(prevLines =>
-      prevLines.map(l =>
-        l.id === lineId
-          ? { ...l, ...mapDbToProductionLine({ ...lineToPause, ...updatePayload } as unknown as DbProductionLine) } 
-          : l
-      ).sort((a,b) => a.displayOrder - b.displayOrder || a.name.localeCompare(b.name))
-    );
+
+    // Refetch all data to ensure the UI is in sync everywhere, preventing visual bugs.
+    await fetchInitialData();
+    
     return { success: true, message: `Linha "${lineToPause.name}" pausada com sucesso.` };
-  }, [productionLines, user, handleError]);
+  }, [productionLines, user, handleError, fetchInitialData]);
 
   const addWorkingTime = useCallback((baseDate: Date, minutesToAdd: number, line: ProductionLine): Date => {
     let newDate = new Date(baseDate);
@@ -639,7 +637,6 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
             const segmentStartForCalc = (startTime > opDayStartDateTime) ? startTime : opDayStartDateTime;
             const segmentEndForCalc = (finalEndTime < opDayEndDateTime) ? finalEndTime : opDayEndDateTime;
             
-            // Further clamp to the current iteration day's boundaries if segment spans multiple days
             const dayStartBoundary = new Date(currentDayIter);
             dayStartBoundary.setHours(0,0,0,0);
             const dayEndBoundary = new Date(currentDayIter);
@@ -648,7 +645,6 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
 
             const effectiveSegmentStart = segmentStartForCalc > dayStartBoundary ? segmentStartForCalc : dayStartBoundary;
             const effectiveSegmentEnd = segmentEndForCalc < dayEndBoundary ? segmentEndForCalc : dayEndBoundary;
-
 
             if (effectiveSegmentEnd > effectiveSegmentStart && effectiveSegmentStart >= opDayStartDateTime && effectiveSegmentEnd <= opDayEndDateTime) {
                  totalEffectiveMinutes += (effectiveSegmentEnd.getTime() - effectiveSegmentStart.getTime()) / (1000 * 60);
@@ -663,27 +659,28 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
   const resumeLineOp = useCallback(async (lineId: string): Promise<{ success: boolean; message?: string }> => {
     const lineToResume = productionLines.find(l => l.id === lineId);
     if (!lineToResume || !lineToResume.isPaused || !lineToResume.currentPauseStartTime || !user) {
-      const msg = !lineToResume ? "Linha não encontrada." : (!lineToResume.isPaused ? "Linha não está pausada." : (!user ? "Usuário não autenticado." : "Dados da pausa atual incompletos."));
-      handleError('resumeLine', new Error(msg));
-      return { success: false, message: msg };
+        const msg = !lineToResume ? "Linha não encontrada." : (!lineToResume.isPaused ? "Linha não está pausada." : (!user ? "Usuário não autenticado." : "Dados da pausa atual incompletos."));
+        handleError('resumeLine', new Error(msg));
+        return { success: false, message: msg };
     }
+
     const pauseStartTimeObj = new Date(lineToResume.currentPauseStartTime);
-    const pauseEndTimeObj = new Date(); 
-    
+    const pauseEndTimeObj = new Date();
     const wallClockPauseDurationMinutes = Math.round((pauseEndTimeObj.getTime() - pauseStartTimeObj.getTime()) / (1000 * 60));
 
+    // 1. Log history and update line status
     const historyEntry: Omit<DbLinePauseHistoryEntry, 'id' | 'created_at'> = {
-      line_id: lineId,
-      paused_by_user_email: lineToResume.pausedByUserEmail || user.email || 'Não especificado',
-      pause_start_time: pauseStartTimeObj.toISOString(),
-      pause_end_time: pauseEndTimeObj.toISOString(),
-      pause_reason: lineToResume.currentPauseReason,
-      duration_minutes: wallClockPauseDurationMinutes,
+        line_id: lineId,
+        paused_by_user_email: lineToResume.pausedByUserEmail || user.email || 'Não especificado',
+        pause_start_time: pauseStartTimeObj.toISOString(),
+        pause_end_time: pauseEndTimeObj.toISOString(),
+        pause_reason: lineToResume.currentPauseReason,
+        duration_minutes: wallClockPauseDurationMinutes,
     };
     const { data: historyData, error: historyError } = await supabase.from('line_pause_history').insert({ ...historyEntry, id: generateUUID() }).select().single();
     if (historyError) {
-      handleError('resumeLine (history logging)', historyError, `Falha ao registrar histórico de pausa para "${lineToResume.name}".`);
-      return { success: false, message: `Falha ao registrar histórico de pausa. Detalhe: ${historyError.message}` };
+        handleError('resumeLine (history logging)', historyError, `Falha ao registrar histórico de pausa para "${lineToResume.name}".`);
+        return { success: false, message: `Falha ao registrar histórico de pausa. Detalhe: ${historyError.message}` };
     }
      if (historyData) {
         setLinePauseHistory(prev => [ { id: historyData.id, lineId: historyData.line_id, pausedByUserEmail: historyData.paused_by_user_email, pauseStartTime: historyData.pause_start_time, pauseEndTime: historyData.pause_end_time, pauseReason: historyData.pause_reason, durationMinutes: historyData.duration_minutes, createdAt: historyData.created_at, }, ...prev ].sort((a,b) => new Date(b.pauseStartTime).getTime() - new Date(a.pauseStartTime).getTime()));
@@ -692,90 +689,105 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
     const updatePayload = { is_paused: false, current_pause_start_time: null, current_pause_reason: null, paused_by_user_email: null, };
     const { error: resumeError } = await supabase.from('production_lines').update(updatePayload).eq('id', lineId);
     if (resumeError) {
-      handleError('resumeLine', resumeError, `Falha ao retomar linha "${lineToResume.name}". Detalhe: ${resumeError.message}`);
-      return { success: false, message: `Falha ao retomar linha. Detalhe: ${resumeError.message}` };
+        handleError('resumeLine', resumeError, `Falha ao retomar linha "${lineToResume.name}". Detalhe: ${resumeError.message}`);
+        return { success: false, message: `Falha ao retomar linha. Detalhe: ${resumeError.message}` };
+    }
+
+    // 2. Schedule Propagation Logic
+    let propagationMessages: string[] = [];
+    let lastValidEndTime = pauseEndTimeObj; // Earliest point a task can continue or start.
+    const allSchedulesOnLine = [...schedules].filter(s => s.lineId === lineId).sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+    const updatesToPerform: { scheduleId: string; updates: Partial<DbScheduledProductionRun> }[] = [];
+
+    // Find the task that was interrupted, if any
+    const interruptedSchedule = allSchedulesOnLine.find(s =>
+        s.status === 'Em Progresso' &&
+        new Date(s.startTime) < pauseStartTimeObj &&
+        new Date(s.endTime) > pauseStartTimeObj
+    );
+    
+    let firstScheduleToRepackIndex = -1;
+
+    if (interruptedSchedule) {
+        firstScheduleToRepackIndex = allSchedulesOnLine.findIndex(s => s.id === interruptedSchedule.id) + 1;
+        const totalWorkRequiredMinutes = calculateEffectiveWorkDuration(new Date(interruptedSchedule.startTime), new Date(interruptedSchedule.endTime), lineToResume);
+        const workDoneBeforePauseMinutes = calculateEffectiveWorkDuration(new Date(interruptedSchedule.startTime), pauseStartTimeObj, lineToResume);
+        const workRemainingMinutes = Math.max(0, totalWorkRequiredMinutes - workDoneBeforePauseMinutes);
+
+        // The task was interrupted. Its end time must be recalculated.
+        // If workRemainingMinutes is 0, addWorkingTime will correctly find the next available slot after the pause ends.
+        const newEndTime = addWorkingTime(pauseEndTimeObj, workRemainingMinutes, lineToResume);
+
+        updatesToPerform.push({
+            scheduleId: interruptedSchedule.id,
+            updates: {
+                end_time: newEndTime.toISOString(),
+                // CRITICAL: Do NOT change the status. It's still 'Em Progresso'.
+                interruption_pause_start_time: pauseStartTimeObj.toISOString(),
+                interruption_pause_end_time: pauseEndTimeObj.toISOString(),
+            }
+        });
+        
+        lastValidEndTime = newEndTime;
+        propagationMessages.push(`Agendamento "${getProductByIdOp(interruptedSchedule.productId)?.name}" continuado após pausa. Novo fim: ${newEndTime.toLocaleString('pt-BR')}.`);
+
+    } else {
+        // No task was 'In Progress'. Find the first pending task affected by the pause.
+        firstScheduleToRepackIndex = allSchedulesOnLine.findIndex(s => new Date(s.startTime) >= pauseStartTimeObj);
+    }
+
+    // "Re-pack" all subsequent schedules
+    if (firstScheduleToRepackIndex !== -1) {
+        for (let i = firstScheduleToRepackIndex; i < allSchedulesOnLine.length; i++) {
+            const scheduleToRepack = allSchedulesOnLine[i];
+            
+            // Only repack pending tasks. Others are considered fixed.
+            if (scheduleToRepack.status !== 'Pendente') {
+                const fixedEndTime = new Date(scheduleToRepack.endTime);
+                if (fixedEndTime > lastValidEndTime) {
+                    lastValidEndTime = fixedEndTime;
+                }
+                continue;
+            }
+
+            const originalDuration = calculateEffectiveWorkDuration(new Date(scheduleToRepack.startTime), new Date(scheduleToRepack.endTime), lineToResume);
+            if (originalDuration <= 0) continue;
+
+            const newStartTime = addWorkingTime(lastValidEndTime, 0, lineToResume);
+            const newEndTime = addWorkingTime(newStartTime, originalDuration, lineToResume);
+
+            updatesToPerform.push({
+                scheduleId: scheduleToRepack.id,
+                updates: {
+                    start_time: newStartTime.toISOString(),
+                    end_time: newEndTime.toISOString(),
+                    interruption_pause_start_time: null,
+                    interruption_pause_end_time: null,
+                }
+            });
+            lastValidEndTime = newEndTime; // Update anchor for the next task
+            propagationMessages.push(`Agendamento pendente "${getProductByIdOp(scheduleToRepack.productId)?.name}" reagendado.`);
+        }
     }
     
-    const effectiveLostOperatingTimeDuringPause = calculateEffectiveWorkDuration(pauseStartTimeObj, pauseEndTimeObj, lineToResume);
-    let propagationMessages: string[] = [];
-
-    for (const schedule of schedules) {
-      if (schedule.lineId !== lineId) continue;
-
-      const originalStartTime = new Date(schedule.startTime);
-      const originalEndTime = new Date(schedule.endTime);
-      let newStartTimeForDb = schedule.startTime;
-      let newEndTimeForDb = schedule.endTime;
-      let newStatusForDb = schedule.status;
-      let interruptionPropsUpdate: { interruption_pause_start_time?: string | null, interruption_pause_end_time?: string | null } = {
-          interruption_pause_start_time: schedule.interruptionPauseStartTime || null, // Preserve existing if any, unless overridden
-          interruption_pause_end_time: schedule.interruptionPauseEndTime || null,
-      };
-
-
-      const originalEffectiveWorkDuration = calculateEffectiveWorkDuration(originalStartTime, originalEndTime, lineToResume);
-
-      if (schedule.status === 'Em Progresso' && originalEndTime > pauseStartTimeObj) { 
-        if (originalStartTime >= pauseStartTimeObj) { 
-            const shiftedStartTime = addWorkingTime(originalStartTime, effectiveLostOperatingTimeDuringPause, lineToResume);
-            newStartTimeForDb = shiftedStartTime.toISOString();
-            newEndTimeForDb = addWorkingTime(shiftedStartTime, originalEffectiveWorkDuration, lineToResume).toISOString();
-            interruptionPropsUpdate.interruption_pause_start_time = null; // Not directly interrupted by *this* pause if it started during
-            interruptionPropsUpdate.interruption_pause_end_time = null;
-            propagationMessages.push(`Agendamento Em Progresso ID ${schedule.id} (${getProductByIdOp(schedule.productId)?.name || 'N/A'}) iniciado durante pausa, reprogramado.`);
-        } else { 
-            const effectiveWorkRemaining = calculateEffectiveWorkDuration(pauseStartTimeObj, originalEndTime, lineToResume);
-
-            if (effectiveWorkRemaining <= 0) {
-                newStatusForDb = 'Concluído';
-                newEndTimeForDb = pauseStartTimeObj.toISOString(); 
-                interruptionPropsUpdate.interruption_pause_start_time = null; // No longer interrupted if completed
-                interruptionPropsUpdate.interruption_pause_end_time = null;
-                propagationMessages.push(`Agendamento ID ${schedule.id} (${getProductByIdOp(schedule.productId)?.name || 'N/A'}) concluído no início da pausa.`);
-            } else {
-                newEndTimeForDb = addWorkingTime(pauseEndTimeObj, effectiveWorkRemaining, lineToResume).toISOString();
-                interruptionPropsUpdate.interruption_pause_start_time = pauseStartTimeObj.toISOString();
-                interruptionPropsUpdate.interruption_pause_end_time = pauseEndTimeObj.toISOString();
-                propagationMessages.push(`Agendamento ID ${schedule.id} (${getProductByIdOp(schedule.productId)?.name || 'N/A'}) continuado, novo fim: ${new Date(newEndTimeForDb).toLocaleString('pt-BR')}.`);
-            }
+    // 3. Perform all updates in the database
+    for (const { scheduleId, updates } of updatesToPerform) {
+        const { error: scheduleUpdateError } = await supabase.from('scheduled_production_runs').update(updates).eq('id', scheduleId);
+        if (scheduleUpdateError) {
+            propagationMessages.push(`Erro ao atualizar agendamento ID ${scheduleId}: ${scheduleUpdateError.message}`);
         }
-      } else if (schedule.status === 'Pendente' && (originalStartTime >= pauseStartTimeObj || (originalEndTime > pauseStartTimeObj && originalStartTime < pauseStartTimeObj))) { 
-        const shiftedStartTime = addWorkingTime(originalStartTime, effectiveLostOperatingTimeDuringPause, lineToResume);
-        newStartTimeForDb = shiftedStartTime.toISOString();
-        newEndTimeForDb = addWorkingTime(shiftedStartTime, originalEffectiveWorkDuration, lineToResume).toISOString();
-        interruptionPropsUpdate.interruption_pause_start_time = null; // Pendente schedules are shifted, not "interrupted" in the same visual way
-        interruptionPropsUpdate.interruption_pause_end_time = null;
-        propagationMessages.push(`Agendamento Pendente ID ${schedule.id} (${getProductByIdOp(schedule.productId)?.name || 'N/A'}) reprogramado devido à pausa.`);
-      }
-
-      if (newStatusForDb !== 'Em Progresso') { // Clear interruption if not actively 'Em Progresso'
-          interruptionPropsUpdate.interruption_pause_start_time = null;
-          interruptionPropsUpdate.interruption_pause_end_time = null;
-      }
-
-
-      if (newStartTimeForDb !== schedule.startTime || newEndTimeForDb !== schedule.endTime || newStatusForDb !== schedule.status || 
-          interruptionPropsUpdate.interruption_pause_start_time !== schedule.interruptionPauseStartTime || 
-          interruptionPropsUpdate.interruption_pause_end_time !== schedule.interruptionPauseEndTime) {
-         const updatedDbSchedule = { 
-            start_time: newStartTimeForDb, 
-            end_time: newEndTimeForDb, 
-            status: newStatusForDb,
-            ...interruptionPropsUpdate 
-        };
-         const { error: scheduleUpdateError } = await supabase.from('scheduled_production_runs').update(updatedDbSchedule).eq('id', schedule.id);
-         if (scheduleUpdateError) {
-            propagationMessages.push(`Erro ao atualizar agendamento ID ${schedule.id}: ${scheduleUpdateError.message}`);
-         }
-      }
     }
-    await fetchInitialData(); 
-    let finalMessage = `Linha "${lineToResume.name}" retomada. Duração (relógio): ${wallClockPauseDurationMinutes} min. Tempo de operação perdido: ${effectiveLostOperatingTimeDuringPause} min.`;
+    
+    // 4. Refetch data and provide feedback
+    await fetchInitialData();
+    const effectiveLostOperatingTimeDuringPause = calculateEffectiveWorkDuration(pauseStartTimeObj, pauseEndTimeObj, lineToResume);
+    let finalMessage = `Linha "${lineToResume.name}" retomada. Tempo de operação perdido: ${effectiveLostOperatingTimeDuringPause} min.`;
     if (propagationMessages.length > 0) {
-        finalMessage += ` Detalhes da propagação: ${propagationMessages.join('; ')}`;
+        finalMessage += ` Resumo das atualizações: ${propagationMessages.slice(0, 2).join('; ')}${propagationMessages.length > 2 ? '...' : ''}`;
     }
     return { success: true, message: finalMessage };
-  }, [productionLines, user, handleError, schedules, getProductByIdOp, fetchInitialData, addWorkingTime, calculateEffectiveWorkDuration]);
+}, [productionLines, user, handleError, schedules, getProductByIdOp, fetchInitialData, addWorkingTime, calculateEffectiveWorkDuration]);
+
 
   const optimizeDaySchedulesOp = useCallback(async (dateToOptimize: Date, targetLineId?: string): Promise<{ optimizedCount: number; unoptimizedCount: number; details: string[] }> => {
     setIsLoading(true);
@@ -945,23 +957,40 @@ export const AppDataProvider: React.FC<{ children: ReactNode }> = ({ children })
   useEffect(() => {
     const timer = setInterval(() => {
       const now = new Date();
+      const updates: Promise<any>[] = [];
       schedules.forEach(schedule => {
+        const line = getProductionLineByIdOp(schedule.lineId);
         const startTime = new Date(schedule.startTime);
         const endTime = new Date(schedule.endTime);
-        if (
-          schedule.status === 'Pendente' &&
-          now >= startTime &&
-          now < endTime
-        ) {
-          const product = getProductByIdOp(schedule.productId);
-          // console.log(`AppDataContext: Schedule ${schedule.id} (${product?.name || 'Desconhecido'}) está iniciando. Atualizando status para 'Em Progresso'.`);
-          updateScheduleOp({ ...schedule, status: 'Em Progresso' });
+
+        // Only process schedules on lines that are NOT paused
+        if (line && !line.isPaused) {
+            // Rule 1: 'Pendente' ==> 'Em Progresso'
+            if (schedule.status === 'Pendente' && now >= startTime && now < endTime) {
+                updates.push(updateScheduleOp({ ...schedule, status: 'Em Progresso' }));
+            }
+            // Rule 2: 'Em Progresso' ==> 'Concluído'
+            else if (schedule.status === 'Em Progresso' && now >= endTime) {
+                updates.push(updateScheduleOp({ ...schedule, status: 'Concluído' }));
+            }
+            // Rule 3: 'Pendente' ==> 'Cancelado' (Missed schedule)
+            else if (schedule.status === 'Pendente' && now >= endTime) {
+                const newNote = `${schedule.notes || ''} (Cancelado automaticamente: horário de produção perdido)`.trim();
+                updates.push(updateScheduleOp({ ...schedule, status: 'Cancelado', notes: newNote }));
+            }
         }
       });
-    }, 60000); // Check every minutea
+      
+      if (updates.length > 0) {
+        // console.log(`AppDataContext: Auto-updating status for ${updates.length} schedules.`);
+        Promise.all(updates).catch(error => {
+            console.error("Error during automatic schedule status update:", error);
+        });
+      }
+    }, 60000); // Check every minute
 
     return () => clearInterval(timer);
-  }, [schedules, updateScheduleOp, getProductByIdOp]); 
+  }, [schedules, updateScheduleOp, getProductionLineByIdOp]); 
 
   return (
     <AppDataContext.Provider value={{
