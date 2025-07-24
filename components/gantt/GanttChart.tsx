@@ -51,16 +51,11 @@ const timeStringToMinutesFromMidnight = (timeStr: string): number => {
 function getOperationalSegments(
   scheduleStartTime: Date,
   scheduleEndTime: Date,
-  line: ProductionLine,
-  interruptionPauseStartTimeParam?: Date | string | null,
-  interruptionPauseEndTimeParam?: Date | string | null
+  line: ProductionLine
 ): Array<{ segmentStart: Date; segmentEnd: Date }> {
   if (scheduleEndTime <= scheduleStartTime) return [];
 
-  const interruptionPauseStart = interruptionPauseStartTimeParam ? new Date(interruptionPauseStartTimeParam) : null;
-  const interruptionPauseEnd = interruptionPauseEndTimeParam ? new Date(interruptionPauseEndTimeParam) : null;
-
-  const rawSegments: Array<{ start: Date; end: Date }> = [];
+  const rawSegments: Array<{ segmentStart: Date; segmentEnd: Date }> = [];
   
   let currentDateIter = new Date(scheduleStartTime.getFullYear(), scheduleStartTime.getMonth(), scheduleStartTime.getDate());
 
@@ -85,7 +80,6 @@ function getOperationalSegments(
       let effectiveStartForDay = scheduleStartTime > opDayStart ? scheduleStartTime : opDayStart;
       let effectiveEndForDay = scheduleEndTime < opDayEnd ? scheduleEndTime : opDayEnd;
 
-      // Ensure the segment is within the current iteration day's bounds and also the overall schedule
       effectiveStartForDay = effectiveStartForDay < currentDateIter ? currentDateIter : effectiveStartForDay;
       
       const nextDayStart = new Date(currentDateIter);
@@ -95,54 +89,14 @@ function getOperationalSegments(
 
 
       if (effectiveStartForDay < effectiveEndForDay) {
-        let blockToProcess = { start: new Date(effectiveStartForDay), end: new Date(effectiveEndForDay) };
-
-        if (interruptionPauseStart && interruptionPauseEnd &&
-            interruptionPauseStart < blockToProcess.end && interruptionPauseEnd > blockToProcess.start) {
-          
-          const prePauseStart = new Date(blockToProcess.start);
-          const prePauseEnd = interruptionPauseStart < blockToProcess.end ? new Date(interruptionPauseStart) : new Date(blockToProcess.end);
-
-          const postPauseStart = interruptionPauseEnd > blockToProcess.start ? new Date(interruptionPauseEnd) : new Date(blockToProcess.start);
-          const postPauseEnd = new Date(blockToProcess.end);
-
-          if (prePauseStart < prePauseEnd && prePauseStart >= scheduleStartTime && prePauseEnd <= scheduleEndTime) {
-             rawSegments.push({ start: prePauseStart, end: prePauseEnd });
-          }
-          if (postPauseStart < postPauseEnd && postPauseStart >= scheduleStartTime && postPauseEnd <= scheduleEndTime) {
-             rawSegments.push({ start: postPauseStart, end: postPauseEnd });
-          }
-        } else {
-          if (blockToProcess.start >= scheduleStartTime && blockToProcess.end <= scheduleEndTime) {
-            rawSegments.push(blockToProcess);
-          }
-        }
+          rawSegments.push({ segmentStart: effectiveStartForDay, segmentEnd: effectiveEndForDay });
       }
     }
     currentDateIter.setDate(currentDateIter.getDate() + 1);
-    currentDateIter.setHours(0,0,0,0); // Ensure we start at the beginning of the next day
+    currentDateIter.setHours(0,0,0,0);
   }
 
-  if (rawSegments.length === 0) return [];
-
-  rawSegments.sort((a, b) => a.start.getTime() - b.start.getTime());
-  const mergedSegments: Array<{ segmentStart: Date; segmentEnd: Date }> = [];
-  if (rawSegments.length > 0) {
-    let currentMerge = { segmentStart: new Date(rawSegments[0].start), segmentEnd: new Date(rawSegments[0].end) };
-    for (let i = 1; i < rawSegments.length; i++) {
-        const nextSegment = rawSegments[i];
-        if (nextSegment.start.getTime() === currentMerge.segmentEnd.getTime()) { // Contiguous
-            currentMerge.segmentEnd = new Date(nextSegment.end);
-        } else if (nextSegment.start < currentMerge.segmentEnd) { // Overlapping
-            currentMerge.segmentEnd = nextSegment.end > currentMerge.segmentEnd ? new Date(nextSegment.end) : currentMerge.segmentEnd;
-        } else { // Gap
-            mergedSegments.push(currentMerge);
-            currentMerge = { segmentStart: new Date(nextSegment.start), segmentEnd: new Date(nextSegment.end) };
-        }
-    }
-    mergedSegments.push(currentMerge);
-  }
-  return mergedSegments.filter(s => s.segmentStart < s.segmentEnd);
+  return rawSegments;
 }
 
 const getContrastingTextColor = (hexColor?: string): string => {
@@ -612,26 +566,38 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                 {lineSchedulesToRender.map(scheduleItem => {
                   const product = getProductById(scheduleItem.productId);
                   const itemStartTime = new Date(scheduleItem.startTime);
-                  const itemEndTime = new Date(scheduleItem.endTime);
+                  const originalItemEndTime = new Date(scheduleItem.endTime);
+                  
+                  let visualRenderEndTime = new Date(originalItemEndTime);
+
+                  const isCurrentlyPausedAndAffectsThisTask = 
+                      line.isPaused &&
+                      line.currentPauseStartTime &&
+                      scheduleItem.status === 'Em Progresso' &&
+                      new Date(line.currentPauseStartTime) < originalItemEndTime;
+                  
+                  if (isCurrentlyPausedAndAffectsThisTask) {
+                      if (currentTime > visualRenderEndTime) {
+                          visualRenderEndTime = new Date(currentTime);
+                      }
+                  }
 
                   const diffMsStartFromView = itemStartTime.getTime() - startDayOfView.getTime();
                   const totalMinutesToItemStartFromViewStart = Math.max(0, diffMsStartFromView / (1000 * 60));
                   const overallItemLeftPixels = minutesToPixels(totalMinutesToItemStartFromViewStart);
                   
-                  const overallDurationMinutes = (itemEndTime.getTime() - itemStartTime.getTime()) / (1000 * 60);
+                  const overallDurationMinutes = (visualRenderEndTime.getTime() - itemStartTime.getTime()) / (1000 * 60);
                   const overallItemWidthPixels = Math.max(minutesToPixels(overallDurationMinutes), 5);
                   
                   const isTopSeller = product?.classification === 'Top Seller';
                   const isDraggable = !isTopSeller && scheduleItem.status === 'Pendente';
                   const isLocked = isTopSeller || scheduleItem.status !== 'Pendente';
+
+                  const workSegmentsEndTime = isCurrentlyPausedAndAffectsThisTask
+                      ? new Date(line.currentPauseStartTime!)
+                      : originalItemEndTime;
                   
-                  const operationalSegments = getOperationalSegments(
-                    itemStartTime, 
-                    itemEndTime, 
-                    line, 
-                    scheduleItem.interruptionPauseStartTime, 
-                    scheduleItem.interruptionPauseEndTime
-                  );
+                  const operationalSegments = getOperationalSegments(itemStartTime, workSegmentsEndTime, line);
 
                   return (
                     <div
@@ -639,11 +605,12 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                       draggable={isDraggable}
                       onDragStart={(e) => isDraggable && handleDragStart(e, scheduleItem)}
                       onDragEnd={handleDragEnd}
-                      title={`${product?.name || 'Prod Desc.'} (${product?.classification}, ${scheduleItem.status})\nInício: ${itemStartTime.toLocaleString('pt-BR')}\nFim: ${itemEndTime.toLocaleString('pt-BR')}${scheduleItem.interruptionPauseStartTime ? `\nPausa: ${new Date(scheduleItem.interruptionPauseStartTime).toLocaleTimeString('pt-BR')} - ${new Date(scheduleItem.interruptionPauseEndTime!).toLocaleTimeString('pt-BR')}` : ''}`}
-                      className={`absolute top-1/2 -translate-y-1/2 h-12 ${draggedItem?.schedule.id === scheduleItem.id ? 'opacity-30' : ''} cursor-${isLocked ? 'not-allowed' : 'grab'} z-20`}
+                      title={`${product?.name || 'Prod Desc.'} (${product?.classification}, ${scheduleItem.status})\nInício: ${itemStartTime.toLocaleString('pt-BR')}\nFim: ${originalItemEndTime.toLocaleString('pt-BR')}${scheduleItem.interruptionPauseStartTime ? `\nPausa: ${new Date(scheduleItem.interruptionPauseStartTime).toLocaleTimeString('pt-BR')} - ${new Date(scheduleItem.interruptionPauseEndTime!).toLocaleTimeString('pt-BR')}` : ''}`}
+                      className={`absolute top-1/2 -translate-y-1/2 h-12 ${draggedItem?.schedule.id === scheduleItem.id ? 'opacity-30' : ''} cursor-${isLocked ? 'not-allowed' : 'grab'} z-20 rounded`}
                       style={{
                         left: `${overallItemLeftPixels}px`,
                         width: `${overallItemWidthPixels}px`,
+                        backgroundColor: `${product?.ganttBarColor || '#3b82f6'}E6`,
                       }}
                     >
                       {operationalSegments.map((segment, index) => {
@@ -656,7 +623,6 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                           
                           if (segmentWidthPixels <= 0) return null;
                           
-                          // --- Style Calculation ---
                           const isCompletedOrCancelled = scheduleItem.status === 'Concluído' || scheduleItem.status === 'Cancelado';
                           const customColor = product?.ganttBarColor;
 
@@ -682,15 +648,10 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                           if (isDraggable) barClasses += ' hover:brightness-110';
                           if (isTopSeller) barClasses += ' border-2 border-yellow-300';
                           if (isCompletedOrCancelled) barStyle.opacity = 0.65;
-                          // --- End Style Calculation ---
 
                           return (
-                            <div
-                                key={index}
-                                className={barClasses}
-                                style={barStyle}
-                            >
-                                {index === 0 && ( /* Show text only on the first segment */
+                            <div key={index} className={barClasses} style={barStyle}>
+                                {index === 0 && (
                                     <>
                                         <span className="truncate flex-grow">{product?.name || 'Produto Desconhecido'}</span>
                                         {isLocked && <LockClosedIcon className="w-3 h-3 ml-1 flex-shrink-0" />}
@@ -699,6 +660,65 @@ const GanttChart = forwardRef<HTMLDivElement, GanttChartProps>(({
                             </div>
                           );
                       })}
+                      
+                      {scheduleItem.interruptionPauseStartTime && scheduleItem.interruptionPauseEndTime && (() => {
+                          const pauseStart = new Date(scheduleItem.interruptionPauseStartTime);
+                          const pauseEnd = new Date(scheduleItem.interruptionPauseEndTime);
+                          if (pauseStart >= pauseEnd) return null;
+
+                          const pauseStartOffsetMs = pauseStart.getTime() - itemStartTime.getTime();
+                          const pauseLeftMinutes = pauseStartOffsetMs / (1000 * 60);
+                          const pauseLeftPixels = minutesToPixels(pauseLeftMinutes);
+                          
+                          const pauseDurationMs = pauseEnd.getTime() - pauseStart.getTime();
+                          const pauseDurationMinutes = pauseDurationMs / (1000 * 60);
+                          const pauseWidthPixels = minutesToPixels(pauseDurationMinutes);
+
+                          return (
+                              <div
+                                  className="absolute top-0 h-full z-10"
+                                  style={{
+                                      left: `${pauseLeftPixels}px`,
+                                      width: `${pauseWidthPixels}px`,
+                                      backgroundColor: 'rgba(191, 25, 25, 0.65)',
+                                      backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0,0,0,0.2) 4px, rgba(0,0,0,0.2) 8px)'
+                                  }}
+                                  title={`Pausa Registrada: ${pauseStart.toLocaleString('pt-BR')} - ${pauseEnd.toLocaleString('pt-BR')}`}
+                              ></div>
+                          );
+                      })()}
+
+                      {isCurrentlyPausedAndAffectsThisTask && (() => {
+                          const pauseStart = new Date(line.currentPauseStartTime!);
+                          const pauseEnd = new Date(currentTime);
+                          if (pauseStart >= pauseEnd) return null;
+
+                          const effectivePauseStart = pauseStart > itemStartTime ? pauseStart : itemStartTime;
+                          if (effectivePauseStart >= pauseEnd) return null;
+                          
+                          const pauseStartOffsetMs = effectivePauseStart.getTime() - itemStartTime.getTime();
+                          const pauseLeftMinutes = pauseStartOffsetMs / (1000 * 60);
+                          const pauseLeftPixels = minutesToPixels(pauseLeftMinutes);
+
+                          const pauseDurationMs = pauseEnd.getTime() - effectivePauseStart.getTime();
+                          const pauseDurationMinutes = pauseDurationMs / (1000 * 60);
+                          const pauseWidthPixels = minutesToPixels(pauseDurationMinutes);
+
+                          if (pauseWidthPixels <= 0) return null;
+
+                          return (
+                              <div
+                                  className="absolute top-0 h-full z-10"
+                                  style={{
+                                      left: `${pauseLeftPixels}px`,
+                                      width: `${pauseWidthPixels}px`,
+                                      backgroundColor: 'rgba(234, 179, 8, 0.75)',
+                                      backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0,0,0,0.2) 4px, rgba(0,0,0,0.2) 8px)'
+                                  }}
+                                  title={`Linha Pausada: ${pauseStart.toLocaleString('pt-BR')}`}
+                              ></div>
+                          );
+                      })()}
                     </div>
                   );
                 })}
